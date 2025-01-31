@@ -8,57 +8,33 @@ set -eo pipefail
 
 ROLE_ARN=$(aws cloudformation describe-stacks --stack-name eks-lambda-python --query "Stacks[0].Outputs[?OutputKey=='Role'].OutputValue" --output text)
 CLUSTER_NAME=$(cat cluster-name.txt)
-RBAC_OBJECT='kind: Role
-apiVersion: rbac.authorization.k8s.io/v1
-metadata:
-  name: read-only
-  namespace: default
-rules:
-- apiGroups: [""]
-  resources: ["*"]
-  verbs: ["get", "watch", "list"]
----
-kind: RoleBinding
-apiVersion: rbac.authorization.k8s.io/v1
-metadata:
-  name: read-only-binding
-  namespace: default
-roleRef:
-  kind: Role
-  name: read-only
-  apiGroup: rbac.authorization.k8s.io
-subjects:
-- kind: Group
-  name: read-only-group'
-
-
-echo ==========
-echo Create Role and RoleBinding in Kubernetes with kubectl
-echo ==========
-echo "$RBAC_OBJECT"
-echo
-while true; do
-    read -p "Do you want to create the Role and RoleBinding? (y/n)" response
-    case $response in
-        [Yy]* ) echo "$RBAC_OBJECT" | kubectl apply -f -; break;;
-        [Nn]* ) break;;
-        * ) echo "Response must start with y or n.";;
-    esac
-done
 
 echo
 echo ==========
-echo Update aws-auth configmap with a new mapping
+echo Change authentication mode to use access entries to use API_AND_CONFIG_MAP
 echo ==========
 echo Cluster: $CLUSTER_NAME
 echo RoleArn: $ROLE_ARN
 echo
-while true; do
-    read -p "Do you want to create the aws-auth configmap entry? (y/n)" response
-    case $response in
-        [Yy]* ) eksctl create iamidentitymapping --cluster $CLUSTER_NAME --group read-only-group --arn $ROLE_ARN; break;;
-        [Nn]* ) break;;
-        * ) echo "Response must start with y or n.";;
-    esac
-done
+AUTH_MODE=$(aws eks describe-cluster --name $CLUSTER_NAME | jq -r .cluster.accessConfig.authenticationMode)
+if [[ $AUTH_MODE == "CONFIG_MAP" ]]; then
+  aws eks update-cluster-config --name $CLUSTER_NAME --access-config authenticationMode=API_AND_CONFIG_MAP 1>/dev/null
+fi
 
+echo
+echo ==========
+echo Create access entry
+echo ==========
+echo
+aws eks create-access-entry --cluster-name $CLUSTER_NAME --principal-arn $ROLE_ARN 1>/dev/null
+
+
+echo
+echo ==========
+echo Associate access policy with access entry
+echo ==========
+echo
+
+aws eks associate-access-policy --cluster-name $CLUSTER_NAME --principal-arn $ROLE_ARN \
+    --access-scope type=namespace,namespaces=default \
+    --policy-arn arn:aws:eks::aws:cluster-access-policy/AmazonEKSViewPolicy 1>/dev/null
